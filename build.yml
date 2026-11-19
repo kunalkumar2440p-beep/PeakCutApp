@@ -1,0 +1,139 @@
+name: Build APK
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - name: Create app files
+        run: |
+          mkdir -p app/src/main/java/com/peakcut/app
+          cat > settings.gradle <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "PeakCutApp"
+          include ':app'
+          EOF
+          cat > build.gradle <<'EOF'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          EOF
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          EOF
+          cat > app/build.gradle <<'EOF'
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'com.peakcut.app'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.peakcut.app'
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+          }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <application android:label="PeakCut" android:usesCleartextTraffic="true"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          cat > app/src/main/java/com/peakcut/app/MainActivity.java <<'EOF'
+          package com.peakcut.app;
+
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.text.InputType;
+          import android.webkit.*;
+          import android.widget.EditText;
+
+          public class MainActivity extends Activity {
+              private WebView web;
+              private ValueCallback<Uri[]> chooser;
+              private static final int PICK = 7;
+
+              @Override protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  web = new WebView(this);
+                  setContentView(web);
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  web.setWebViewClient(new WebViewClient() {
+                      @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
+                          if (r.isForMainFrame()) askUrl("Server nahi mila. URL check karo:");
+                      }
+                  });
+                  web.setWebChromeClient(new WebChromeClient() {
+                      @Override public boolean onShowFileChooser(WebView w, ValueCallback<Uri[]> cb, FileChooserParams p) {
+                          if (chooser != null) chooser.onReceiveValue(null);
+                          chooser = cb;
+                          Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+                          i.addCategory(Intent.CATEGORY_OPENABLE);
+                          i.setType("*/*");
+                          startActivityForResult(Intent.createChooser(i, "File chuno"), PICK);
+                          return true;
+                      }
+                  });
+                  web.setDownloadListener((url, ua, cd, mime, len) ->
+                      startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))));
+                  String saved = prefs().getString("url", "");
+                  if (saved.isEmpty()) askUrl("PeakCut server ka URL daalo:"); else web.loadUrl(saved);
+              }
+
+              private SharedPreferences prefs() { return getSharedPreferences("pc", MODE_PRIVATE); }
+
+              private void askUrl(String msg) {
+                  EditText t = new EditText(this);
+                  t.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
+                  String cur = prefs().getString("url", "");
+                  t.setText(cur.isEmpty() ? "http://" : cur);
+                  new AlertDialog.Builder(this).setTitle("PeakCut").setMessage(msg).setView(t)
+                      .setCancelable(false)
+                      .setPositiveButton("Open", (d, w) -> {
+                          String u = t.getText().toString().trim();
+                          if (!u.startsWith("http")) u = "http://" + u;
+                          prefs().edit().putString("url", u).apply();
+                          web.loadUrl(u);
+                      }).show();
+              }
+
+              @Override protected void onActivityResult(int req, int res, Intent data) {
+                  if (req == PICK && chooser != null) {
+                      chooser.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(res, data));
+                      chooser = null;
+                  }
+              }
+
+              @Override public void onBackPressed() {
+                  if (web.canGoBack()) web.goBack(); else super.onBackPressed();
+              }
+          }
+          EOF
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: 8.7 }
+      - run: gradle assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PeakCut-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
